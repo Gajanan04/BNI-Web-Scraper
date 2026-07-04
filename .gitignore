@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+response.html
+profile.html
+output.xlsx
