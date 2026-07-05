@@ -2,7 +2,23 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 from openpyxl import load_workbook
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import time
+import pandas as pd
 
+
+PAYLOAD = {
+    "pageMode": "Live_Site",
+    "chapterId": "R8NtNFIn2t/uQ862UAXnVg==",
+    "languageLocaleCode": "en_IN",
+    "website_type": "1",
+    "website_id": "13451",
+    "mappedWidgetSettings": '[{"key":83,"name":"Chapter Website","value":"Chapter Website"},{"key":84,"name":"View Chapter Gallery","value":"View Chapter Gallery"},{"key":85,"name":"Visit This Chapter","value":"Visit This Chapter"},{"key":86,"name":"Member Names","value":"Member Name"},{"key":87,"name":"Company","value":"Company"},{"key":88,"name":"Profession/Speciality","value":"Profession/Speciality"},{"key":89,"name":"Phone","value":"Phone"},{"key":90,"name":"Send Mail","value":"Send Mail"},{"key":91,"name":"Showing","value":"Showing"},{"key":92,"name":"to","value":"to"},{"key":93,"name":"of","value":"of"},{"key":94,"name":"entries","value":"entries"},{"key":95,"name":"Meeting Details","value":"Meeting Details"},{"key":96,"name":"View Map","value":"View Map"},{"key":97,"name":"Member Count","value":"Member Count"},{"key":98,"name":"Show Members","value":"Show Members"},{"key":99,"name":"Chapter Leadership","value":"Chapter Leadership"},{"key":233,"name":"Directions","value":"Directions"},{"key":307,"name":"Zero Records","value":"Zero Records"},{"key":390,"name":"Apply Now"}]',
+    "planyourvisit": "y"
+}
 
 # ==========================================================
 # CONFIGURATION
@@ -16,15 +32,10 @@ HEADERS = {
     "Referer": "https://bni-india.in/en-IN/chapterdetail"
 }
 
-PAYLOAD = {
-    "pageMode": "Live_Site",
-    "chapterId": "R8NtNFIn2t/uQ862UAXnVg==",
-    "languageLocaleCode": "en_IN",
-    "website_type": "1",
-    "website_id": "13451",
-    "mappedWidgetSettings": '[{"key":83,"name":"Chapter Website","value":"Chapter Website"},{"key":84,"name":"View Chapter Gallery","value":"View Chapter Gallery"},{"key":85,"name":"Visit This Chapter","value":"Visit This Chapter"},{"key":86,"name":"Member Names","value":"Member Name"},{"key":87,"name":"Company","value":"Company"},{"key":88,"name":"Profession/Speciality","value":"Profession/Speciality"},{"key":89,"name":"Phone","value":"Phone"},{"key":90,"name":"Send Mail","value":"Send Mail"},{"key":91,"name":"Showing","value":"Showing"},{"key":92,"name":"to","value":"to"},{"key":93,"name":"of","value":"of"},{"key":94,"name":"entries","value":"entries"},{"key":95,"name":"Meeting Details","value":"Meeting Details"},{"key":96,"name":"View Map","value":"View Map"},{"key":97,"name":"Member Count","value":"Member Count"},{"key":98,"name":"Show Members","value":"Show Members"},{"key":99,"name":"Chapter Leadership","value":"Chapter Leadership"},{"key":233,"name":"Directions","value":"Directions"},{"key":307,"name":"Zero Records","value":"Zero Records"},{"key":390,"name":"Apply Now"}]',
-    "planyourvisit": "y"
-}
+session = requests.Session()
+session.headers.update(HEADERS)
+
+
 
 
 # ==========================================================
@@ -33,9 +44,8 @@ PAYLOAD = {
 
 print("Downloading member list...")
 
-response = requests.post(
+response = session.post(
     AJAX_URL,
-    headers=HEADERS,
     data=PAYLOAD
 )
 
@@ -80,10 +90,21 @@ for row in rows[1:]:
 
     profile = cols[0].find("a")
 
+    from urllib.parse import urlparse, parse_qs
+
+    profile = cols[0].find("a")
+
+    profile_url = ""
+    member_id = ""
+
     if profile:
+
         profile_url = "https://bni-india.in/en-IN/" + profile["href"]
-    else:
-        profile_url = ""
+
+    query = urlparse(profile["href"]).query
+    params = parse_qs(query)
+
+    member_id = params.get("encryptedMemberId", [""])[0]
 
     members.append({
     "Name": name,
@@ -91,7 +112,8 @@ for row in rows[1:]:
     "Profession": profession,
     "Phone": phone,
     "Website": "",
-    "Profile URL": profile_url
+    "Profile URL": profile_url,
+    "Member ID": member_id
 })
 
 # ==========================================================
@@ -100,6 +122,18 @@ for row in rows[1:]:
 
 df = pd.DataFrame(members)
 
+options = webdriver.ChromeOptions()
+
+# Comment this if you want to see Chrome
+# options.add_argument("--headless=new")
+
+driver = webdriver.Chrome(
+    service=Service(ChromeDriverManager().install()),
+    options=options
+)
+
+df["Address"] = ""
+df["Chapter"] = ""
 # ============================================
 # SCRAPE WEBSITE FROM LEADERSHIP CARD
 # ============================================
@@ -129,6 +163,26 @@ for card in cards:
 
     website_map[company] = website
 
+    print("\nWebsite Map")
+
+for k, v in website_map.items():
+    print(f"'{k}' --> {v}")
+
+
+print("\nCompanies in DataFrame")
+for company in df["Company"]:
+    print(f"'{company}'")
+
+for index in df.index:
+
+    company = df.loc[index, "Company"].strip().lower()
+
+    for key, website in website_map.items():
+
+        if company == key.strip().lower():
+            df.loc[index, "Website"] = website
+            break
+
 print("\nWebsites Found")
 
 for company, website in website_map.items():
@@ -138,32 +192,87 @@ for company, website in website_map.items():
 # UPDATE WEBSITE COLUMN
 # ============================================
 
+    print("\nFetching Address & Chapter...")
+
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 for index in df.index:
 
-    company = df.loc[index, "Company"]
+    url = df.loc[index, "Profile URL"]
 
-    if company in website_map:
-        df.loc[index, "Website"] = website_map[company]
+    print(f"{index+1}/{len(df)} -> {df.loc[index, 'Name']}")
+
+    driver.get(url)
+
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.TAG_NAME, "body"))
+    )
+
+    member_soup = BeautifulSoup(driver.page_source, "html.parser")
+
+    # Save first page for debugging only
+    if index == 0:
+        with open("member_page.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print("Saved member_page.html")
+
+    # ---------------- Address ----------------
+    address = ""
+
+    address_tag = member_soup.select_one(
+        "section.widgetMemberCompanyDetail h6"
+    )
+
+    if address_tag:
+        address = address_tag.get_text(
+            separator=", ",
+            strip=True
+        )
+
+    # ---------------- Chapter ----------------
+    chapter = ""
+
+    chapter_tag = member_soup.select_one(
+        ".memberContactDetails p a"
+    )
+
+    if chapter_tag:
+        chapter = chapter_tag.get_text(strip=True)
+
+    # Save to DataFrame
+    df.loc[index, "Address"] = address
+    df.loc[index, "Chapter"] = chapter
+
+    print("Chapter :", chapter)
+    print("Address :", address)
+    print("-" * 60)
+
+driver.quit()
 
 print("\nFirst Five Records\n")
 
-print(df[["Name", "Company", "Website"]].head())
+print(df[["Name", "Chapter", "Address"]].head())
 
 print("\nTotal Members :", len(df))
 
 # ==========================================================
 # SAVE EXCEL
 # ==========================================================
-
+df["Website"] = df["Website"].apply(
+    lambda x: "N/A" if pd.isna(x) or str(x).strip() == "" else x
+)
 # Save DataFrame first
-df.to_excel("output.xlsx", index=False)
+df.to_excel("BNI_Members_Data.xlsx", index=False)
 
 # Open workbook
-wb = load_workbook("output.xlsx")
+wb = load_workbook("BNI_Members_Data.xlsx")
 ws = wb.active
-ws.freeze_panes = "A2"
+
 
 from openpyxl.styles import Font
+
+ws.freeze_panes = "A2"
 
 for cell in ws[1]:
     cell.font = Font(bold=True)
@@ -180,7 +289,7 @@ for column in ws.columns:
     ws.column_dimensions[column_letter].width = min(max_length + 3, 60)
 
 # Save formatted workbook
-wb.save("output.xlsx")
+wb.save("BNI_Members_Data.xlsx")
 
 
 
